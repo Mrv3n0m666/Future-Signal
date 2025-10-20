@@ -26,7 +26,7 @@ def get_all_futures_symbols():
         return syms
     except requests.exceptions.RequestException as e:
         print(f"Failed to fetch futures symbols: {e}")
-        return ["BTCUSDT"]  # Fallback ke BTCUSDT kalau gagal
+        return ["BTCUSDT"]  # Fallback
 
 def get_top_volume(limit=20):
     try:
@@ -53,9 +53,9 @@ def refresh_symbols_periodic(top_limit=20, window_days=7, interval=3600):
             cutoff = now - timedelta(days=window_days)
             new_listing = [s for s, iso in known.items() if datetime.fromisoformat(iso) >= cutoff]
             top = get_top_volume(top_limit)
-            combined = list(dict.fromkeys(top + new_listing))
+            combined = list(dict.fromkeys(top + new_listing))[:60]  # Batasi ke 60 koin
             save_symbols(combined)
-            print("Refreshed symbols:", len(combined))
+            print(f"Refreshed symbols: {len(combined)}")
         except Exception as e:
-            print("coin_manager error", e)
+            print(f"coin_manager error: {e}")
         time.sleep(interval)
