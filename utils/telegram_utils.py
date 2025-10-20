@@ -8,7 +8,7 @@ def make_bot(token):
 
 async def send_message_async(bot, chat_id, text):
     try:
-        response = await bot.send_message(chat_id=chat_id, text=text, timeout=10)
+        response = await bot.send_message(chat_id=chat_id, text=text)  # Hapus timeout=10
         print(f"Message sent to {chat_id} successfully, message_id: {response.message_id}")
         return True
     except Exception as e:
