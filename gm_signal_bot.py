@@ -1,5 +1,4 @@
 import asyncio, json, os, time
-from collections import deque, defaultdict
 import pandas as pd, numpy as np
 import websockets
 from datetime import datetime, timezone
@@ -7,16 +6,12 @@ from dotenv import load_dotenv
 from utils.indicators import ema, rsi, atr
 from utils.telegram_utils import make_bot, send_message_async, send_photo_async
 from utils.data_store import save_json, load_json
-from utils.data_store import _path as ds_path
-from utils.data_store import save_json as save_ds_json
-from utils.data_store import load_json as load_ds_json
-from utils.stats_manager import record_result
-from utils.telegram_utils import make_bot
-from utils import logger
+from collections import deque, defaultdict
+import matplotlib.pyplot as plt
+import io
+from PIL import Image
 
 load_dotenv()
-log = logger.get_logger("gm_signal_bot")
-
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 FSTREAM = os.getenv("BINANCE_FAPI_URL", "wss://fstream.binance.com") + "/stream?streams="
@@ -31,6 +26,20 @@ VOLUME_MULTIPLIER = float(os.getenv("VOLUME_MULTIPLIER","1.3"))
 ALERT_COOLDOWN_SEC = int(os.getenv("COOLDOWN_SECONDS","90"))
 HISTORY_LEN = int(os.getenv("HISTORY_LEN","300"))
 
+async def send_chart(bot, chat_id, df, symbol, tf):
+    plt.figure(figsize=(10, 5))
+    plt.plot(df["close"], label="Close Price")
+    plt.plot(df["close"].ewm(span=EMA_FAST).mean(), label=f"EMA {EMA_FAST}")
+    plt.plot(df["close"].ewm(span=EMA_MED).mean(), label=f"EMA {EMA_MED}")
+    plt.title(f"{symbol} {tf} Chart")
+    plt.legend()
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png")
+    buf.seek(0)
+    plt.close()
+    await send_photo_async(bot, chat_id, buf, caption=f"Chart for {symbol} ({tf})")
+    buf.close()
+
 async def monitor_chunk(symbols):
     history = {s.upper(): {tf: {"open_time": deque(maxlen=HISTORY_LEN), "open": deque(maxlen=HISTORY_LEN),
                                "high": deque(maxlen=HISTORY_LEN),"low": deque(maxlen=HISTORY_LEN),
@@ -39,8 +48,8 @@ async def monitor_chunk(symbols):
     last_alert = defaultdict(lambda: 0.0)
     streams = "/".join(f"{s}@kline_{tf}" for s in symbols for tf in TIMEFRAMES)
     ws_url = FSTREAM + streams
-    reconnect = 5
-    while True:  # Tambah retry logic
+    while True:
+        print(f"[{datetime.now(timezone.utc).isoformat()}] Monitoring WebSocket for {len(symbols)} symbols")
         try:
             async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10, max_queue=None) as ws:
                 async for raw in ws:
@@ -93,12 +102,6 @@ async def monitor_chunk(symbols):
                         if now_ts - last_alert[key] < ALERT_COOLDOWN_SEC:
                             continue
                         last_alert[key] = now_ts
-                        def compute_tp_sl(side, price, atr):
-                            if atr<=0: atr = max(price*0.001, 1e-6)
-                            if side=="buy":
-                                return {"tp1":price+0.5*atr,"tp2":price+1.0*atr,"tp3":price+1.5*atr,"sl":price-0.8*atr}
-                            else:
-                                return {"tp1":price-0.5*atr,"tp2":price-1.0*atr,"tp3":price-1.5*atr,"sl":price+0.8*atr}
                         tp_sl = compute_tp_sl(side, price, atr_now)
                         signals = load_json(os.path.join(os.path.dirname(__file__),"..","data","signals_active.json"))
                         uid = f"{sym}_{tf}_{int(time.time())}"
@@ -106,7 +109,8 @@ async def monitor_chunk(symbols):
                         signals[uid]=entry
                         save_json(os.path.join(os.path.dirname(__file__),"..","data","signals_active.json"), signals)
                         msg = f"🚨 GOLDEN MOMENT — {sym}\nTF: {tf}\nSide: {side.upper()}\nEntry: {price:.8f}\nTP1: {tp_sl['tp1']:.8f} TP2: {tp_sl['tp2']:.8f} TP3: {tp_sl['tp3']:.8f}\nSL: {tp_sl['sl']:.8f}"
-                        await send_message_async(make_bot(TELEGRAM_TOKEN), TELEGRAM_CHAT_ID, msg)
+                        await send_message_async(bot, TELEGRAM_CHAT_ID, msg)
+                        await send_chart(bot, TELEGRAM_CHAT_ID, df, sym, tf)  # Kirim chart
                     except Exception as e:
                         print(f"processing error: {e}")
                         continue
@@ -119,7 +123,7 @@ async def start_signal_monitor():
     if os.path.exists(syms_file):
         s = json.load(open(syms_file))
         syms = s.get("symbols", ["BTCUSDT"])[:60]
-        print(f"Monitoring {len(syms)} symbols: {syms}")  # Log koin yang dipantau
+        print(f"Monitoring {len(syms)} symbols: {syms}")
     else:
         syms = ["BTCUSDT"]
         print("No symbols.json, defaulting to BTCUSDT")
