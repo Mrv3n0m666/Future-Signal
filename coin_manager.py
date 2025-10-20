@@ -1,3 +1,4 @@
+import asyncio
 import time
 import json
 import os
@@ -72,10 +73,10 @@ def get_top_volume(limit=40):
         return ["BTCUSDT"]
 
 # ==========================
-# REFRESH SYMBOLS PERIODIK
+# REFRESH SYMBOLS PERIODIK (ASYNC FIX)
 # ==========================
-def refresh_symbols_periodic(top_limit=40, window_days=7, interval=3600):
-    """Perbarui daftar simbol aktif setiap jam"""
+async def refresh_symbols_periodic(top_limit=40, window_days=7, interval=3600):
+    """Perbarui daftar simbol aktif setiap jam (asynchronous)"""
     while True:
         try:
             now = datetime.now(timezone.utc)
@@ -114,5 +115,5 @@ def refresh_symbols_periodic(top_limit=40, window_days=7, interval=3600):
         except Exception as e:
             print(f"❌ coin_manager error: {e}")
 
-        time.sleep(interval)
-        yield from asyncio.sleep(interval)
+        # Tunggu sesuai interval sebelum refresh lagi
+        await asyncio.sleep(interval)
