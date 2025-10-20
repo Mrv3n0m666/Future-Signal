@@ -1,3 +1,4 @@
+# gm_signal_bot.py
 import asyncio, json, os, time
 import pandas as pd
 import websockets
@@ -14,72 +15,132 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 FSTREAM = os.getenv("BINANCE_FAPI_URL", "wss://fstream.binance.com") + "/stream?streams="
+
 TIMEFRAMES = [tf.strip() for tf in os.getenv("TIMEFRAMES", "1m,3m,5m").split(",")]
 ALERT_COOLDOWN_SEC = int(os.getenv("COOLDOWN_SECONDS", "90"))
 HISTORY_LEN = int(os.getenv("HISTORY_LEN", "300"))
+BATCH_SIZE = int(os.getenv("BATCH_SIZE", "50"))  # jumlah coin per koneksi websocket
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 SIGNALS_ACTIVE = os.path.join(DATA_DIR, "signals_active.json")
 os.makedirs(DATA_DIR, exist_ok=True)
-if not os.path.exists(SIGNALS_ACTIVE): save_json(SIGNALS_ACTIVE, {})
+if not os.path.exists(SIGNALS_ACTIVE):
+    save_json(SIGNALS_ACTIVE, {})
 
-def save_active(d): json.dump(d, open(SIGNALS_ACTIVE, "w"), indent=2, default=str)
-def load_active(): return json.load(open(SIGNALS_ACTIVE)) if os.path.exists(SIGNALS_ACTIVE) else {}
 
-async def monitor_chunk(symbols):
-    history = {s: {tf: {k: deque(maxlen=HISTORY_LEN) for k in ["open_time","open","high","low","close","volume"]} for tf in TIMEFRAMES} for s in symbols}
+def save_active(d):
+    with open(SIGNALS_ACTIVE, "w") as f:
+        json.dump(d, f, indent=2, default=str)
+
+
+def load_active():
+    if not os.path.exists(SIGNALS_ACTIVE):
+        return {}
+    return json.load(open(SIGNALS_ACTIVE))
+
+
+# ==========================================
+# MONITOR UNTUK SATU BATCH SYMBOL
+# ==========================================
+async def monitor_batch(symbols):
+    """Monitor 1 batch symbol"""
+    history = {
+        s: {
+            tf: {k: deque(maxlen=HISTORY_LEN) for k in ["open_time", "open", "high", "low", "close", "volume"]}
+            for tf in TIMEFRAMES
+        }
+        for s in symbols
+    }
+
     bot = make_bot(TELEGRAM_TOKEN)
     last_alert = defaultdict(lambda: 0.0)
-    ws_url = FSTREAM + "/".join(f"{s.lower()}@kline_{tf}" for s in symbols for tf in TIMEFRAMES)
+
+    streams = "/".join(f"{s.lower()}@kline_{tf}" for s in symbols for tf in TIMEFRAMES)
+    ws_url = FSTREAM + streams
 
     while True:
         try:
-            async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10) as ws:
+            async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10, max_queue=None) as ws:
                 async for raw in ws:
-                    data = json.loads(raw).get("data", {})
-                    k = data.get("k", {})
-                    if not k or not k.get("x", False): continue
-                    sym, tf = k["s"], k["i"]
-                    if sym not in history: continue
-                    h = history[sym][tf]
-                    for key in ["open_time","open","high","low","close","volume"]:
-                        h[key].append(float(k[key[0]] if key != "open_time" else k["t"]))
+                    try:
+                        parsed = json.loads(raw)
+                        data = parsed.get("data", {})
+                        k = data.get("k", {})
+                        if not k or not k.get("x", False):
+                            continue
 
-                    df = pd.DataFrame(h)
-                    if len(df) < 100: continue
-                    sig = detect_signal(df)
-                    if not sig: continue
+                        sym, tf = k["s"], k["i"]
+                        if sym not in history:
+                            continue
 
-                    key = f"{sym}|{tf}"
-                    if time.time() - last_alert[key] < ALERT_COOLDOWN_SEC: continue
-                    last_alert[key] = time.time()
+                        h = history[sym][tf]
+                        h["open_time"].append(int(k["t"]))
+                        h["open"].append(float(k["o"]))
+                        h["high"].append(float(k["h"]))
+                        h["low"].append(float(k["l"]))
+                        h["close"].append(float(k["c"]))
+                        h["volume"].append(float(k["v"]))
 
-                    atr, price = sig["atr"], sig["price"]
-                    tp1 = price + (0.5 * atr if sig["side"]=="buy" else -0.5 * atr)
-                    tp2 = price + (1.0 * atr if sig["side"]=="buy" else -1.0 * atr)
-                    tp3 = price + (1.5 * atr if sig["side"]=="buy" else -1.5 * atr)
-                    sl  = price - (0.8 * atr if sig["side"]=="buy" else -0.8 * atr)
+                        df = pd.DataFrame(h)
+                        if len(df) < 100:
+                            continue
 
-                    leverage = recommend_leverage(sig["confidence"], sig["atr_pct"])
-                    tstamp = datetime.now(timezone.utc).isoformat()
+                        sig = detect_signal(df)
+                        if not sig:
+                            continue
 
-                    msg = (
-                        "🚀 *VIP GOLDEN SIGNAL* 🚀\n\n"
-                        f"💎 Pair: *{sym}*\n"
-                        f"🕒 TF: *{tf}*\n"
-                        f"📈 Side: *{sig['side'].upper()}*\n"
-                        f"💰 Entry: `{price:.6f}`\n"
-                        f"🎯 Targets:\n"
-                        f"• TP1: `{tp1:.6f}`\n• TP2: `{tp2:.6f}`\n• TP3: `{tp3:.6f}`\n"
-                        f"🛑 Stoploss: `{sl:.6f}`\n\n"
-                        f"⚙️ Confidence: *{sig['confidence']}%*\n"
-                        f"🔧 Leverage Suggestion: *{leverage}*\n\n"
-                        f"📖 Reason: {sig['reason']}\n"
-                        f"📆 Time: {tstamp}"
-                    )
+                        key = f"{sym}|{tf}"
+                        now_ts = time.time()
+                        if now_ts - last_alert[key] < ALERT_COOLDOWN_SEC:
+                            continue
+                        last_alert[key] = now_ts
 
-                    await send_message_async(bot, TELEGRAM_CHAT_ID, msg)
-                    print(f"Sent signal {sym} {tf} {sig['side']} conf {sig['confidence']} lev {leverage}")
+                        atr, price = sig["atr"], sig["price"]
+                        tp1 = price + (0.5 * atr if sig["side"] == "buy" else -0.5 * atr)
+                        tp2 = price + (1.0 * atr if sig["side"] == "buy" else -1.0 * atr)
+                        tp3 = price + (1.5 * atr if sig["side"] == "buy" else -1.5 * atr)
+                        sl = price - (0.8 * atr if sig["side"] == "buy" else -0.8 * atr)
+
+                        leverage = recommend_leverage(sig["confidence"], sig.get("atr_pct", 0))
+                        tstamp = datetime.now(timezone.utc).isoformat()
+
+                        msg = (
+                            "🚀 *VIP GOLDEN SIGNAL* 🚀\n\n"
+                            f"💎 Pair: *{sym}*\n"
+                            f"🕒 TF: *{tf}*\n"
+                            f"📈 Side: *{sig['side'].upper()}*\n"
+                            f"💰 Entry: `{price:.6f}`\n"
+                            f"🎯 Targets:\n"
+                            f"• TP1: `{tp1:.6f}`\n• TP2: `{tp2:.6f}`\n• TP3: `{tp3:.6f}`\n"
+                            f"🛑 Stoploss: `{sl:.6f}`\n\n"
+                            f"⚙️ Confidence: *{sig['confidence']}%*\n"
+                            f"🔧 Leverage Suggestion: *{leverage}*\n\n"
+                            f"📖 Reason: {sig['reason']}\n"
+                            f"📆 Time: {tstamp}"
+                        )
+
+                        await send_message_async(bot, TELEGRAM_CHAT_ID, msg)
+                        print(f"✅ Sent {sym} {tf} {sig['side']} ({sig['confidence']}%) lev {leverage}")
+
+                    except Exception as e:
+                        print("Processing error:", e)
+                        continue
+
         except Exception as e:
-            print("WS error:", e)
+            print(f"⚠️ WS error in batch {symbols[:2]}...{symbols[-2:]}: {e}")
             await asyncio.sleep(5)
+
+
+# ==========================================
+# PEMBAGIAN BATCH
+# ==========================================
+async def monitor_chunk(symbols):
+    """Bagi symbol ke beberapa batch paralel"""
+    tasks = []
+    for i in range(0, len(symbols), BATCH_SIZE):
+        chunk = symbols[i:i + BATCH_SIZE]
+        print(f"📡 Starting batch {i//BATCH_SIZE+1} with {len(chunk)} symbols...")
+        tasks.append(asyncio.create_task(monitor_batch(chunk)))
+        await asyncio.sleep(1)  # beri jeda supaya koneksi stabil
+
+    await asyncio.gather(*tasks)

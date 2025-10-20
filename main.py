@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 
 from gm_signal_bot import monitor_chunk
 from coin_manager import refresh_symbols_periodic
+from utils.telegram_utils import make_bot, send_message_async
 
 # =============== LOAD ENV ===============
 load_dotenv()
@@ -39,14 +40,31 @@ async def main():
     print("🚀 Starting Future-Signal Golden Moment v2")
     print(f"🕒 {datetime.now(timezone.utc).isoformat()} UTC")
 
-    # Refresh daftar simbol secara berkala di background
-    asyncio.create_task(refresh_symbols_periodic())
+    # 🔔 Kirim test message ke Telegram untuk konfirmasi bot aktif
+    try:
+        bot = make_bot(TELEGRAM_TOKEN)
+        msg = (
+            "✅ *Future-Signal Golden Moment v2 aktif!*\n\n"
+            "Bot berhasil dijalankan di server Railway 🚀\n"
+            "Sekarang sistem sedang memantau pair dan menunggu sinyal momentum ⚡"
+        )
+        await send_message_async(bot, TELEGRAM_CHAT_ID, msg)
+        print("✅ Sent startup test message to Telegram successfully.")
+    except Exception as e:
+        print(f"⚠️ Failed to send startup message: {e}")
+
+    # Jalankan background refresh symbol task
+    try:
+        asyncio.create_task(refresh_symbols_periodic())
+    except TypeError:
+        print("⚠️ Fungsi refresh_symbols_periodic bukan async, ubah ke async def di coin_manager.py")
+        return
 
     # Ambil daftar simbol
     symbols = get_symbols_list()
     print(f"🧠 Monitoring {len(symbols)} symbols...")
 
-    # Jalankan deteksi signal
+    # Jalankan deteksi signal utama
     await monitor_chunk(symbols)
 
 

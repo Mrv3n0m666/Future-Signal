@@ -106,7 +106,7 @@ async def refresh_symbols_periodic(top_limit=40, window_days=7, interval=3600):
             combined = list(dict.fromkeys(WHITELIST + new_listing + top))
 
             # Batasi maksimum (default 60)
-            combined = combined[:60]
+            combined = combined[:300]
             save_symbols(combined)
 
             print(f"✅ Refreshed {len(combined)} symbols at {now.isoformat()}")
