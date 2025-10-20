@@ -1,47 +1,41 @@
+# gm_signal_bot.py  (replace existing file)
 import asyncio, json, os, time
-import pandas as pd, numpy as np
+from collections import deque, defaultdict
+import pandas as pd
 import websockets
 from datetime import datetime, timezone
 from dotenv import load_dotenv
-from utils.indicators import ema, rsi, atr
+
 from utils.telegram_utils import make_bot, send_message_async, send_photo_async
-from utils.data_store import save_json, load_json
-from collections import deque, defaultdict
-import matplotlib.pyplot as plt
-import io
-from PIL import Image
+from utils.data_store import load_json, save_json
+from utils.signal_engine_v2 import detect_signal
 
 load_dotenv()
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 FSTREAM = os.getenv("BINANCE_FAPI_URL", "wss://fstream.binance.com") + "/stream?streams="
 
 TIMEFRAMES = [tf.strip() for tf in os.getenv("TIMEFRAMES","1m,3m,5m").split(",")]
-EMA_FAST = int(os.getenv("EMA_FAST","7"))
-EMA_MED = int(os.getenv("EMA_SLOW","25"))
-EMA_LONG = int(os.getenv("EMA_TREND","99"))
-RSI_FAST = int(os.getenv("RSI_FAST","6"))
-RSI_SLOW = int(os.getenv("RSI_SLOW","24"))
-VOLUME_MULTIPLIER = float(os.getenv("VOLUME_MULTIPLIER","1.3"))
 ALERT_COOLDOWN_SEC = int(os.getenv("COOLDOWN_SECONDS","90"))
 HISTORY_LEN = int(os.getenv("HISTORY_LEN","300"))
 
-async def send_chart(bot, chat_id, df, symbol, tf):
-    plt.figure(figsize=(10, 5))
-    plt.plot(df["close"], label="Close Price")
-    plt.plot(df["close"].ewm(span=EMA_FAST).mean(), label=f"EMA {EMA_FAST}")
-    plt.plot(df["close"].ewm(span=EMA_MED).mean(), label=f"EMA {EMA_MED}")
-    plt.title(f"{symbol} {tf} Chart")
-    plt.legend()
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png")
-    buf.seek(0)
-    plt.close()
-    await send_photo_async(bot, chat_id, buf, caption=f"Chart for {symbol} ({tf})")
-    buf.close()
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+SIGNALS_ACTIVE = os.path.join(DATA_DIR, "signals_active.json")
+os.makedirs(DATA_DIR, exist_ok=True)
+if not os.path.exists(SIGNALS_ACTIVE):
+    save_json(SIGNALS_ACTIVE, {})
+
+def save_active(d):
+    with open(SIGNALS_ACTIVE, "w") as f:
+        json.dump(d, f, indent=2, default=str)
+
+def load_active():
+    if not os.path.exists(SIGNALS_ACTIVE):
+        return {}
+    return json.load(open(SIGNALS_ACTIVE))
 
 async def monitor_chunk(symbols):
-    print(f"Memulai WebSocket untuk {symbols}")  # Logging awal
     history = {s.upper(): {tf: {"open_time": deque(maxlen=HISTORY_LEN), "open": deque(maxlen=HISTORY_LEN),
                                "high": deque(maxlen=HISTORY_LEN),"low": deque(maxlen=HISTORY_LEN),
                                "close": deque(maxlen=HISTORY_LEN),"volume": deque(maxlen=HISTORY_LEN)} for tf in TIMEFRAMES} for s in symbols}
@@ -49,10 +43,10 @@ async def monitor_chunk(symbols):
     last_alert = defaultdict(lambda: 0.0)
     streams = "/".join(f"{s}@kline_{tf}" for s in symbols for tf in TIMEFRAMES)
     ws_url = FSTREAM + streams
+    reconnect = 5
     while True:
         try:
             async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10, max_queue=None) as ws:
-                print(f"WebSocket terhubung untuk {symbols}")  # Logging koneksi
                 async for raw in ws:
                     try:
                         parsed = json.loads(raw)
@@ -62,6 +56,7 @@ async def monitor_chunk(symbols):
                             continue
                         sym = k.get("s","").upper()
                         tf = k.get("i","")
+                        if sym not in history: continue
                         h = history[sym][tf]
                         h["open_time"].append(int(k.get("t",0)))
                         h["open"].append(float(k.get("o",0)))
@@ -69,74 +64,75 @@ async def monitor_chunk(symbols):
                         h["low"].append(float(k.get("l",0)))
                         h["close"].append(float(k.get("c",0)))
                         h["volume"].append(float(k.get("v",0)))
-                        df = pd.DataFrame({"open_time": list(h["open_time"]), "open": list(h["open"]), "high": list(h["high"]),
-                                           "low": list(h["low"]), "close": list(h["close"]), "volume": list(h["volume"])})
-                        if len(df) < 120:
+
+                        # build df for this timeframe
+                        df = pd.DataFrame({
+                            "open_time": list(h["open_time"]),
+                            "open": list(h["open"]),
+                            "high": list(h["high"]),
+                            "low": list(h["low"]),
+                            "close": list(h["close"]),
+                            "volume": list(h["volume"]),
+                        })
+                        # require enough candles
+                        if len(df) < 60:
                             continue
-                        closes = df["close"].astype(float)
-                        highs = df["high"].astype(float)
-                        lows = df["low"].astype(float)
-                        vols = df["volume"].astype(float)
-                        ema_fast = closes.ewm(span=EMA_FAST, adjust=False).mean()
-                        ema_med = closes.ewm(span=EMA_MED, adjust=False).mean()
-                        ema_long = closes.ewm(span=EMA_LONG, adjust=False).mean()
-                        ema_fast_now = ema_fast.iloc[-1]; ema_fast_prev = ema_fast.iloc[-2]
-                        ema_med_now = ema_med.iloc[-1]; ema_med_prev = ema_med.iloc[-2]
-                        rsi6 = rsi(closes, RSI_FAST).iloc[-1]
-                        rsi24 = rsi(closes, RSI_SLOW).iloc[-1]
-                        vol_ma = vols.rolling(20).mean().iloc[-1]
-                        vol_now = vols.iloc[-1]
-                        atr_now = atr(highs, lows, closes).iloc[-1]
-                        price = float(closes.iloc[-1])
-                        crossed_up = (ema_fast_prev <= ema_med_prev) and (ema_fast_now > ema_med_now)
-                        crossed_dn = (ema_fast_prev >= ema_med_prev) and (ema_fast_now < ema_med_now)
-                        vol_ok = vol_now > (vol_ma * VOLUME_MULTIPLIER)
-                        side = None
-                        if crossed_up and rsi6>50 and rsi24>50 and price>ema_long and vol_ok:
-                            side = "buy"
-                        elif crossed_dn and rsi6<50 and rsi24<50 and price<ema_long and vol_ok:
-                            side = "short"
-                        if not side:
+
+                        # detect using signal engine v2
+                        sig = detect_signal(df)
+                        if not sig:
                             continue
+
                         key = f"{sym}|{tf}"
                         now_ts = time.time()
                         if now_ts - last_alert[key] < ALERT_COOLDOWN_SEC:
                             continue
                         last_alert[key] = now_ts
-                        tp_sl = compute_tp_sl(side, price, atr_now)
-                        signals = load_json(os.path.join(os.path.dirname(__file__),"..","data","signals_active.json"))
+
+                        # compute TP/SL using ATR
+                        atr = sig.get("atr", 0.0)
+                        price = sig["price"]
+                        if sig["side"] == "buy":
+                            tp1 = price + 0.5 * atr
+                            tp2 = price + 1.0 * atr
+                            tp3 = price + 1.5 * atr
+                            sl  = price - 0.8 * atr
+                        else:
+                            tp1 = price - 0.5 * atr
+                            tp2 = price - 1.0 * atr
+                            tp3 = price - 1.5 * atr
+                            sl  = price + 0.8 * atr
+
+                        # create entry and save
+                        signals = load_active()
                         uid = f"{sym}_{tf}_{int(time.time())}"
-                        entry = {"id":uid,"symbol":sym,"tf":tf,"side":side,"entry":price,"tp1":tp_sl["tp1"],"tp2":tp_sl["tp2"],"tp3":tp_sl["tp3"],"sl":tp_sl["sl"],"status":"OPEN","time":datetime.now(timezone.utc).isoformat()}
-                        signals[uid]=entry
-                        save_json(os.path.join(os.path.dirname(__file__),"..","data","signals_active.json"), signals)
-                        msg = f"🚨 GOLDEN MOMENT — {sym}\nTF: {tf}\nSide: {side.upper()}\nEntry: {price:.8f}\nTP1: {tp_sl['tp1']:.8f} TP2: {tp_sl['tp2']:.8f} TP3: {tp_sl['tp3']:.8f}\nSL: {tp_sl['sl']:.8f}"
+                        tstamp = datetime.now(timezone.utc).isoformat()
+                        entry = {
+                            "id": uid, "symbol": sym, "tf": tf, "side": sig["side"],
+                            "entry": price, "tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl,
+                            "confidence": sig.get("confidence", 0), "reason": sig.get("reason",""),
+                            "atr": atr, "vol": sig.get("vol", 0), "status": "OPEN", "time": tstamp
+                        }
+                        signals[uid] = entry
+                        save_active(signals)
+
+                        # send telegram message
+                        msg = (
+                            f"🔥 *GOLDEN MOMENT* — {sym}\n"
+                            f"TF: *{tf}*  |  Side: *{sig['side'].upper()}*  |  Confidence: *{entry['confidence']}%*\n\n"
+                            f"Entry: `{price:.8f}`\n"
+                            f"TP1: `{tp1:.8f}`  TP2: `{tp2:.8f}`  TP3: `{tp3:.8f}`\n"
+                            f"SL: `{sl:.8f}`\n\n"
+                            f"Reason: {entry['reason']}\n"
+                            f"Time: {tstamp}"
+                        )
                         await send_message_async(bot, TELEGRAM_CHAT_ID, msg)
-                        await send_chart(bot, TELEGRAM_CHAT_ID, df, sym, tf)
+                        print(f"Sent signal {sym} {tf} {sig['side']} confidence {entry['confidence']} at {tstamp}")
+
                     except Exception as e:
-                        print(f"Error processing data untuk {sym} {tf}: {e}")  # Logging error processing
+                        print("processing error:", e)
                         continue
         except Exception as e:
-            print(f"WebSocket error untuk {symbols}: {e}, reconnecting in 5 seconds...")  # Logging error WebSocket
-            await asyncio.sleep(5)
-
-async def start_signal_monitor():
-    syms_file = os.path.join(os.path.dirname(__file__),"..","data","symbols.json")
-    if os.path.exists(syms_file):
-        s = json.load(open(syms_file))
-        syms = s.get("symbols", ["BTCUSDT"])[:60]
-        print(f"Monitoring {len(syms)} symbols: {syms}")
-    else:
-        syms = ["BTCUSDT"]
-        print("No symbols.json, defaulting to BTCUSDT")
-    chunks = [syms[i:i+20] for i in range(0, len(syms), 20)]
-    tasks = [asyncio.create_task(monitor_chunk(chunk)) for chunk in chunks]
-    await asyncio.gather(*tasks)
-
-# Fungsi compute_tp_sl diasumsikan ada di tempat lain (misalnya utils.indicators)
-def compute_tp_sl(side, price, atr):
-    atr_factor = 2.0
-    sl = price - (atr * atr_factor) if side == "buy" else price + (atr * atr_factor)
-    tp1 = price + (atr * atr_factor) if side == "buy" else price - (atr * atr_factor)
-    tp2 = tp1 + (atr * atr_factor)
-    tp3 = tp2 + (atr * atr_factor)
-    return {"tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl}
+            print("WS error:", e)
+            await asyncio.sleep(reconnect)
+            reconnect = min(60, reconnect*2)
