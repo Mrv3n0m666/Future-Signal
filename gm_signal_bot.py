@@ -41,7 +41,7 @@ async def send_chart(bot, chat_id, df, symbol, tf):
     buf.close()
 
 async def monitor_chunk(symbols):
-    print(f"Memulai WebSocket untuk {symbols}")  # Tambahan logging
+    print(f"Memulai WebSocket untuk {symbols}")  # Logging awal
     history = {s.upper(): {tf: {"open_time": deque(maxlen=HISTORY_LEN), "open": deque(maxlen=HISTORY_LEN),
                                "high": deque(maxlen=HISTORY_LEN),"low": deque(maxlen=HISTORY_LEN),
                                "close": deque(maxlen=HISTORY_LEN),"volume": deque(maxlen=HISTORY_LEN)} for tf in TIMEFRAMES} for s in symbols}
@@ -52,6 +52,7 @@ async def monitor_chunk(symbols):
     while True:
         try:
             async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10, max_queue=None) as ws:
+                print(f"WebSocket terhubung untuk {symbols}")  # Logging koneksi
                 async for raw in ws:
                     try:
                         parsed = json.loads(raw)
@@ -112,10 +113,10 @@ async def monitor_chunk(symbols):
                         await send_message_async(bot, TELEGRAM_CHAT_ID, msg)
                         await send_chart(bot, TELEGRAM_CHAT_ID, df, sym, tf)
                     except Exception as e:
-                        print(f"error processing: {e}")
+                        print(f"Error processing data untuk {sym} {tf}: {e}")  # Logging error processing
                         continue
         except Exception as e:
-            print(f"WebSocket error: {e}, reconnecting in 5 seconds...")
+            print(f"WebSocket error untuk {symbols}: {e}, reconnecting in 5 seconds...")  # Logging error WebSocket
             await asyncio.sleep(5)
 
 async def start_signal_monitor():
@@ -130,3 +131,12 @@ async def start_signal_monitor():
     chunks = [syms[i:i+20] for i in range(0, len(syms), 20)]
     tasks = [asyncio.create_task(monitor_chunk(chunk)) for chunk in chunks]
     await asyncio.gather(*tasks)
+
+# Fungsi compute_tp_sl diasumsikan ada di tempat lain (misalnya utils.indicators)
+def compute_tp_sl(side, price, atr):
+    atr_factor = 2.0
+    sl = price - (atr * atr_factor) if side == "buy" else price + (atr * atr_factor)
+    tp1 = price + (atr * atr_factor) if side == "buy" else price - (atr * atr_factor)
+    tp2 = tp1 + (atr * atr_factor)
+    tp3 = tp2 + (atr * atr_factor)
+    return {"tp1": tp1, "tp2": tp2, "tp3": tp3, "sl": sl}
