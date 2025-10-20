@@ -6,9 +6,13 @@ from coin_manager import refresh_symbols_periodic
 from gm_signal_bot import start_signal_monitor
 from tracker import start_tracker
 
+# Buat direktori data jika belum ada
 os.makedirs("data", exist_ok=True)
+
+# Muat variabel lingkungan
 load_dotenv()
 
+# Ambil variabel dari environment
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -28,11 +32,16 @@ async def test_signal():
 
 async def main():
     bot = make_bot(TELEGRAM_TOKEN)
-    await test_signal()  # Kirim test sinyal sekali saat start
+    print(f"Mulai bot dengan CHAT_ID: {TELEGRAM_CHAT_ID}")  # Logging awal
+    await test_signal()
+    print("Selesai test signal")  # Logging setelah test
     asyncio.create_task(refresh_symbols_periodic())
     asyncio.create_task(start_tracker())
-    asyncio.create_task(send_heartbeat())  # Jalankan heartbeat
+    asyncio.create_task(send_heartbeat())
     await start_signal_monitor()
+    # Tes manual
+    await send_message_async(bot, TELEGRAM_CHAT_ID, "Tes Manual dari Railway pada " + datetime.now(timezone.utc).isoformat())
+    print("Terkirim tes manual ke Telegram")
 
 if __name__ == "__main__":
     try:
