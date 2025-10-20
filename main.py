@@ -6,6 +6,8 @@ from utils.telegram_utils import make_bot, send_message_async
 from coin_manager import refresh_symbols_periodic
 from gm_signal_bot import start_signal_monitor
 from tracker import start_tracker
+import os
+os.makedirs("data", exist_ok=True)
 load_dotenv()
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")

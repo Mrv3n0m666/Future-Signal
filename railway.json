@@ -1,0 +1,11 @@
+{
+  "build": {
+    "builder": "NIXPACKS",
+    "nixpacksPlan": {
+      "providers": ["python"],
+      "pythonVersion": "3.12"
+    },
+    "buildCommand": "pip install -r requirements.txt",
+    "startCommand": "python main.py"
+  }
+}
