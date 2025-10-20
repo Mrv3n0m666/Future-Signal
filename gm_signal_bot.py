@@ -41,6 +41,7 @@ async def send_chart(bot, chat_id, df, symbol, tf):
     buf.close()
 
 async def monitor_chunk(symbols):
+    print(f"Memulai WebSocket untuk {symbols}")  # Tambahan logging
     history = {s.upper(): {tf: {"open_time": deque(maxlen=HISTORY_LEN), "open": deque(maxlen=HISTORY_LEN),
                                "high": deque(maxlen=HISTORY_LEN),"low": deque(maxlen=HISTORY_LEN),
                                "close": deque(maxlen=HISTORY_LEN),"volume": deque(maxlen=HISTORY_LEN)} for tf in TIMEFRAMES} for s in symbols}
@@ -49,7 +50,6 @@ async def monitor_chunk(symbols):
     streams = "/".join(f"{s}@kline_{tf}" for s in symbols for tf in TIMEFRAMES)
     ws_url = FSTREAM + streams
     while True:
-        print(f"[{datetime.now(timezone.utc).isoformat()}] Monitoring WebSocket for {len(symbols)} symbols")
         try:
             async with websockets.connect(ws_url, ping_interval=20, ping_timeout=10, max_queue=None) as ws:
                 async for raw in ws:
@@ -110,9 +110,9 @@ async def monitor_chunk(symbols):
                         save_json(os.path.join(os.path.dirname(__file__),"..","data","signals_active.json"), signals)
                         msg = f"🚨 GOLDEN MOMENT — {sym}\nTF: {tf}\nSide: {side.upper()}\nEntry: {price:.8f}\nTP1: {tp_sl['tp1']:.8f} TP2: {tp_sl['tp2']:.8f} TP3: {tp_sl['tp3']:.8f}\nSL: {tp_sl['sl']:.8f}"
                         await send_message_async(bot, TELEGRAM_CHAT_ID, msg)
-                        await send_chart(bot, TELEGRAM_CHAT_ID, df, sym, tf)  # Kirim chart
+                        await send_chart(bot, TELEGRAM_CHAT_ID, df, sym, tf)
                     except Exception as e:
-                        print(f"processing error: {e}")
+                        print(f"error processing: {e}")
                         continue
         except Exception as e:
             print(f"WebSocket error: {e}, reconnecting in 5 seconds...")
