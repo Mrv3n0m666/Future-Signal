@@ -115,3 +115,4 @@ def refresh_symbols_periodic(top_limit=40, window_days=7, interval=3600):
             print(f"❌ coin_manager error: {e}")
 
         time.sleep(interval)
+        yield from asyncio.sleep(interval)
