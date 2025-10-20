@@ -25,7 +25,7 @@ def get_price(sym):
 
 def send_msg(text):
     try:
-        bot.send_message(TELEGRAM_CHAT_ID, text, "Markdown")
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text, parse_mode="Markdown")
     except Exception as e:
         print("tg error", e)
 
